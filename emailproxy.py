@@ -1062,6 +1062,17 @@ class OAuth2Helper:
                                                                    RedirectionReceiverWSGIApplication(),
                                                                    handler_class=LoggingWSGIRequestHandler)
 
+            #SR BB 
+			#Handle SSL wrapping of socket if required
+            if token_request['redirect_uri'].lower().startswith('https'):
+                local_auth_certificate_path = token_request['local_auth_certificate_path']
+                local_auth_key_path = token_request['local_auth_key_path']
+                Log.info('Local auth cert path %s', local_auth_certificate_path)
+                Log.info('Local auth key path %s', local_auth_key_path)
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(local_auth_certificate_path,local_auth_key_path)
+                redirection_server.socket = context.wrap_socket (redirection_server.socket, server_hostname=parsed_uri.hostname)
+
             Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
             redirection_server.handle_request()
@@ -1134,7 +1145,15 @@ class OAuth2Helper:
             if not success:
                 return False, device_grant_result
 
-        token_request = {'permission_url': permission_url, 'user_code': user_code, 'redirect_uri': redirect_uri,
+
+        config = AppConfig.get()
+        if redirect_uri.lower().startswith('https'):
+            local_auth_certificate_path = config.get(username, 'local_authentication_certificate_path', fallback=None)
+            local_auth_key_path = config.get(username, 'local_authentication_key_path', fallback=None)
+            token_request = {'permission_url': permission_url, 'user_code': user_code, 'redirect_uri': redirect_uri,
+                         'redirect_listen_address': redirect_listen_address, 'username': username, 'expired': False, 'local_auth_certificate_path' : local_auth_certificate_path, 'local_auth_key_path' : local_auth_key_path}
+        else:
+            token_request = {'permission_url': permission_url, 'user_code': user_code, 'redirect_uri': redirect_uri,
                          'redirect_listen_address': redirect_listen_address, 'username': username, 'expired': False}
         REQUEST_QUEUE.put(token_request)
         response_queue_reference = RESPONSE_QUEUE  # referenced locally to avoid inserting into the new queue on restart
