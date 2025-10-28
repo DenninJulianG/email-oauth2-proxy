@@ -47,6 +47,12 @@ import wsgiref.simple_server
 import wsgiref.util
 import zlib
 
+#Import smtp for simple notifications
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
 # asyncore is essential, but has been deprecated and will be removed in python 3.12 (see PEP 594)
 # pyasyncore is our workaround, so suppress this warning until the proxy is rewritten in, e.g., asyncio
 with warnings.catch_warnings():
@@ -709,6 +715,47 @@ class Cryptographer:
 
     def rotate(self, value):
         return self.fernet.rotate(value.encode('utf-8')).decode('utf-8')
+
+
+class NotificationSMTP:
+
+    #overloaded methods - full creds for plain login to send
+    @staticmethod
+    def sendMail(recpient, sender, smtplogin, smtppassword, smtpaddress, smtpport, subject, message):
+        smtpsslcontext=ssl.create_default_context()
+
+        message = MIMEMultipart()
+        message["From"] = sender
+        message["To"] = recpient
+        message["Subject"] = subject
+        message.attach(MIMEText(message,"html"))
+
+        with smtplib.SMTP(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
+            try:
+                smtp_server.login(smtplogin,smtppassword)
+            except Exception as error:
+                Log.error('An exception occured logging into smtp server to send notification: %s', error )
+            try:
+                smtp_server.sendmail(sender,recpient, message.as_string())
+            except Exception as error: 
+                Log.error('An exception occured sending via smtp server to send notification: %s', error )
+
+    #overloaded methods - no login for sending without credentials to send
+    @staticmethod
+    def sendMail(recpient, sender, smtpaddress, smtpport, subject, message):
+        smtpsslcontext=ssl.create_default_context()
+
+        message = MIMEMultipart()
+        message["From"] = sender
+        message["To"] = recpient
+        message["Subject"] = subject
+        message.attach(MIMEText(message,"html"))
+
+        with smtplib.SMTP(smtpaddress, smtpport, smtpsslcontext) as smtp_server:
+            try:
+                smtp_server.sendmail(sender,recpient, message.as_string())
+            except Exception as error: 
+                Log.error('An exception occured sending via smtp server to send notification: %s', error )
 
 
 class OAuth2Helper:
