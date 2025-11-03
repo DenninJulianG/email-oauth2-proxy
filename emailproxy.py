@@ -47,6 +47,53 @@ import wsgiref.simple_server
 import wsgiref.util
 import zlib
 
+# Import boto3
+import boto3
+
+# AWS SNS Setup - Uses existing topic and credentials
+parser = configparser.ConfigParser()
+parser.read(os.path.join(os.path.dirname(__file__), "emailproxy.config"))
+
+# Read SNS Topic ARN from config file
+TOPIC_ARN = parser.get("aws", "sns_topic_arn", fallback=None)
+
+# Create SNS client (boto3 auto-detects credentials and region)
+aws_client = boto3.client("sns")
+
+def send_sns_email(username, permission_url):
+    try:
+        message = (
+            f"Dear {username},\n\n"
+            "You have a new authentication request pending.\n\n"
+            "Please click the link below to authenticate your account securely:\n\n"
+            f"{permission_url}\n\n"
+            "If you did not request this action, please ignore this email.\n\n"
+            "Best regards,\n"
+            "Security Team\n"
+            "--------------------------------------\n"
+            "This is an automated message. Please do not reply."
+        )
+
+        subject = "Action Required: Authenticate Your Account"
+
+        # Publish only for the specific username via filter policy
+        response = aws_client.publish(
+            TopicArn=TOPIC_ARN,
+            Message=message,
+            Subject=subject,
+            MessageAttributes={
+                "username": {
+                    "DataType": "String",
+                    "StringValue": username
+                }
+            }
+        )
+
+        print(f"SNS message sent only for {username}. MessageId: {response['MessageId']}")
+
+    except Exception as e:
+        print(f"Error sending SNS message for {username}: {e}")
+
 #Import smtp for simple notifications
 import smtplib
 from email.mime.text import MIMEText
@@ -1134,15 +1181,24 @@ class OAuth2Helper:
                 redirection_server.socket = context.wrap_socket (redirection_server.socket, server_hostname=parsed_uri.hostname)
 
             config = AppConfig.get()
-            notificationmethods = (AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')).split(',')
-
+            notificationmethodsfull = AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')
+            if notificationmethodsfull:
+                if ',' in notificationmethodsfull:
+                    notificationmethods = notificationmethodsfull.split(',')
+                elif isinstance(notificationmethodsfull, str):
+                    notificationmethods = notificationmethodsfull
+            else:
+                notificationmethods="log"
+            
             if 'log' in notificationmethods:
                 Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
+                send_sns_email(token_request['username'], token_request['permission_url'])
 
             if not notificationmethods:
                 Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
+                send_sns_email(token_request['username'], token_request['permission_url'])
                 
             if 'smtp' in notificationmethods:
                 message="""\
@@ -1165,9 +1221,7 @@ class OAuth2Helper:
                     NotificationSMTP.sendMail(recipient, sender, smtpaddress, smtpport, smtpencmethod, subject, message)
                 else:
                     NotificationSMTP.sendMailwithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
-
-
-                
+            
             redirection_server.handle_request()
             with contextlib.suppress(socket.error):
                 redirection_server.server_close()
