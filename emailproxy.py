@@ -47,6 +47,97 @@ import wsgiref.simple_server
 import wsgiref.util
 import zlib
 
+# Import boto3
+import boto3
+
+# Read configuration file
+config_path = os.path.join(os.path.dirname(__file__), "emailproxy.config")
+parser = configparser.ConfigParser()
+parser.read(config_path)
+
+# Global fallback SNS topic (from [aws] section)
+GLOBAL_TOPIC_ARN = parser.get("aws", "sns_topic_arn", fallback=None)
+
+# Initialize SNS client only if configuration exists
+aws_client = None
+if GLOBAL_TOPIC_ARN:
+    try:
+        session = boto3.session.Session()
+        region_name = session.region_name or os.getenv("AWS_REGION", "eu-west-1")
+        aws_client = boto3.client("sns", region_name=region_name)
+    except Exception as e:
+        print(f"[Warning] Failed to initialize SNS client: {e}")
+else:
+    print("[Info] No SNS topic configured — SNS client not initialized.")
+
+#    Get per-user SNS topic ARN from config.
+#    Falls back to global topic if user-specific one not found.
+def get_sns_topic_for_user(config, username):
+    try:
+        topic_arn = AppConfig.get_option_with_catch_all_fallback(config, username, "sns_topic_arn")
+    except Exception:
+        topic_arn = None
+
+    return topic_arn or GLOBAL_TOPIC_ARN
+
+
+#    Send a notification to the appropriate SNS topic for this user.
+#    Uses per-account SNS topic with fallback to global.
+def send_sns_email(username, permission_url):
+    # --- Logging fallback setup ---
+    global Log
+    if 'Log' not in globals() or Log is None:
+        import logging
+        Log = logging.getLogger("SNSFallback")
+        if not Log.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter("[%(levelname)s] %(message)s")
+            handler.setFormatter(formatter)
+            Log.addHandler(handler)
+        Log.setLevel(logging.INFO)
+        Log.info("[SNS] Logging fallback initialized for standalone test.")
+
+    # --- Core SNS Logic ---
+    Log.info("[SNS] send_sns_email called for %s", username)
+
+    if not aws_client:
+        Log.info("[SNS] Skipping send — SNS not configured.")
+        return
+
+    config = AppConfig.get()
+    topic_arn = get_sns_topic_for_user(config, username)
+    if not topic_arn:
+        Log.warning("[SNS] No topic ARN found for %s", username)
+        return
+
+    try:
+        message = (
+            f"Dear {username},\n\n"
+            "You have a new authentication request pending.\n\n"
+            f"Please click the link below to authenticate your account securely:\n\n"
+            f"{permission_url}\n\n"
+            "If you did not request this action, please ignore this email.\n\n"
+            "Best regards,\nSecurity Team\n"
+        )
+        subject = "Action Required: Authenticate Your Account"
+
+        Log.info("[SNS] Sending message for %s to topic %s", username, topic_arn)
+
+        response = aws_client.publish(
+            TopicArn=topic_arn,
+            Message=message,
+            Subject=subject,
+            MessageAttributes={
+                "username": {"DataType": "String", "StringValue": username.lower()}
+            },
+        )
+
+        Log.info("[SNS] Message sent for %s (MessageId: %s)",
+                 username, response.get("MessageId"))
+
+    except Exception as e:
+        Log.error("[SNS] Failed to send SNS message for %s: %s", username, str(e))
+
 #Import smtp for simple notifications
 import smtplib
 from email.mime.text import MIMEText
@@ -1134,11 +1225,27 @@ class OAuth2Helper:
                 redirection_server.socket = context.wrap_socket (redirection_server.socket, server_hostname=parsed_uri.hostname)
 
             config = AppConfig.get()
-            notificationmethods = (AppConfig.get_option_with_catch_all_fallback(config, token_request['username'], 'notification_methods')).split(',')
+            notificationmethods = []  # ensure variable is always defined
 
+            notificationmethodsfull = AppConfig.get_option_with_catch_all_fallback(
+                config, token_request['username'], 'notification_methods'
+                )
+
+            if notificationmethodsfull:
+                if isinstance(notificationmethodsfull, str):
+                    notificationmethods = [m.strip().lower() for m in notificationmethodsfull.split(',')]
+                else:
+                    notificationmethods = ['log']  # default fallback
+
+            
             if 'log' in notificationmethods:
                 Log.info('Please visit the following URL to authenticate account %s: %s' %
                      (token_request['username'], token_request['permission_url']))
+
+            Log.info("DEBUG: notificationmethods = %s", notificationmethods)
+            # Add this SNS call block here
+            if 'sns' in notificationmethods:
+                send_sns_email(token_request['username'], token_request['permission_url'])
 
             if not notificationmethods:
                 Log.info('Please visit the following URL to authenticate account %s: %s' %
@@ -1165,9 +1272,7 @@ class OAuth2Helper:
                     NotificationSMTP.sendMail(recipient, sender, smtpaddress, smtpport, smtpencmethod, subject, message)
                 else:
                     NotificationSMTP.sendMailwithLogin(recipient, sender, smtplogin, smtppassword, smtpaddress, smtpport, smtpencmethod, subject, message)
-
-
-                
+            
             redirection_server.handle_request()
             with contextlib.suppress(socket.error):
                 redirection_server.server_close()
